@@ -1,0 +1,8 @@
+name = "atos-api"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[vars]
+FEISHU_BITABLE = "Zd90bzqGXafgAFs2ltZc4nzIn4b"
