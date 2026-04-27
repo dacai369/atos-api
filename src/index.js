@@ -31,6 +31,41 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
+const WRITE_METHODS = new Set(['POST', 'PATCH', 'DELETE']);
+const KNOWN_ROLES = ['协调者', '统筹者', '推进者', '执行者', '破局者', '技术支持者'];
+const NOTIFY_ALLOWED_ROLES = [...KNOWN_ROLES];
+
+// keep in sync with atos-app/src/lib/permissions.ts
+export const ACTION_RULES = {
+  dispatches: { POST: ['协调者'] },
+  tasks: { POST: ['协调者', '统筹者'], PATCH: ['协调者', '执行者', '推进者'], DELETE: ['协调者'] },
+  followups: { POST: ['推进者', '协调者'], DELETE: ['推进者', '协调者'] },
+  blockages: { POST: ['执行者'], PATCH: ['破局者'] },
+  submissions: { POST: ['执行者'] },
+  arbitrations: { POST: ['统筹者'], PATCH: ['统筹者'] },
+  okrs: { PATCH: ['统筹者'] },
+  krs: { PATCH: ['统筹者'] },
+  tickets: { POST: ['技术支持者'], PATCH: ['技术支持者'] },
+  prompts: { PATCH: ['技术支持者'] },
+  members: { PATCH: ['技术支持者', '协调者', '统筹者'] },
+};
+
+const ROLE_ALIASES = {
+  协调者: '协调者',
+  coordinator: '协调者',
+  统筹者: '统筹者',
+  planner: '统筹者',
+  推进者: '推进者',
+  driver: '推进者',
+  执行者: '执行者',
+  executor: '执行者',
+  破局者: '破局者',
+  breaker: '破局者',
+  技术支持者: '技术支持者',
+  技术支持: '技术支持者',
+  tech: '技术支持者',
+};
+
 // Token 缓存（Worker 实例级别）
 let _token = null;
 let _expireAt = 0;
@@ -138,6 +173,70 @@ async function verifyJwt(token, secret) {
     if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
     return payload;
   } catch { return null; }
+}
+
+function normalizeRoleLabel(label) {
+  if (!label) return null;
+  const role = String(label).trim();
+  if (KNOWN_ROLES.includes(role)) return role;
+  return ROLE_ALIASES[role] || null;
+}
+
+export function extractActorRoles(roleInput) {
+  const roles = new Set();
+  const inputs = Array.isArray(roleInput) ? roleInput : [roleInput];
+
+  for (const item of inputs) {
+    if (item === null || item === undefined) continue;
+    const text = String(item);
+
+    // 精确切分匹配
+    for (const chunk of text.split(/[,，、/|;\s]+/)) {
+      const normalized = normalizeRoleLabel(chunk);
+      if (normalized) roles.add(normalized);
+    }
+
+    // 子串匹配，兼容“协调者·主属性 / 执行者·第二属性”这类值
+    for (const [alias, normalized] of Object.entries(ROLE_ALIASES)) {
+      if (text.includes(alias)) roles.add(normalized);
+    }
+  }
+  return Array.from(roles);
+}
+
+async function authenticateRequest(request, env) {
+  const auth = request.headers.get('Authorization') || '';
+  const token = auth.replace(/^Bearer\s+/i, '').trim();
+  if (!token) return null;
+  return verifyJwt(token, getJwtSecret(env));
+}
+
+export function requireRole(payload, allowedRoles, action) {
+  if (!payload) {
+    return {
+      ok: false,
+      status: 401,
+      body: { error: '未登录或 token 失效', action },
+    };
+  }
+
+  const actorRoles = extractActorRoles(payload.role ?? payload.roles ?? '');
+  const allowed = actorRoles.some((role) => allowedRoles.includes(role));
+  if (allowed) {
+    return { ok: true, status: 200, actorRoles };
+  }
+
+  return {
+    ok: false,
+    status: 403,
+    body: {
+      error: '权限不足',
+      action,
+      required_roles: allowedRoles,
+      current_roles: actorRoles,
+      current_role_raw: payload.role ?? '',
+    },
+  };
 }
 
 // ───────── 飞书 OAuth ─────────
@@ -353,6 +452,10 @@ export default {
     // 必须带至少一个目标字段。优先级：open_id > member_id > name
     if (url.pathname === '/api/notify' && request.method === 'POST') {
       try {
+        const payload = await authenticateRequest(request, env);
+        const notifyGuard = requireRole(payload, NOTIFY_ALLOWED_ROLES, 'notify:POST');
+        if (!notifyGuard.ok) return json(notifyGuard.body, notifyGuard.status);
+
         const body = await request.json();
         const { open_id, member_id, name, text, link, source } = body || {};
         if (!text) return json({ error: '缺少 text' }, 400);
@@ -379,6 +482,20 @@ export default {
     if (!tableId) return json({ error: '未知表名' }, 404);
 
     try {
+      if (WRITE_METHODS.has(request.method)) {
+        const allowedRoles = ACTION_RULES[tableName]?.[request.method];
+        if (!allowedRoles) {
+          return json({
+            error: '当前资源不允许该写操作',
+            table: tableName,
+            method: request.method,
+          }, 403);
+        }
+        const payload = await authenticateRequest(request, env);
+        const authz = requireRole(payload, allowedRoles, `${tableName}:${request.method}`);
+        if (!authz.ok) return json(authz.body, authz.status);
+      }
+
       const token = await getToken(env);
       const feishuUrl = `${FEISHU}/bitable/v1/apps/${BITABLE}/tables/${tableId}/records`;
 

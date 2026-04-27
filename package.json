@@ -1,5 +1,11 @@
 {
   "name": "atos-api",
   "version": "1.0.0",
-  "description": "ATOS 飞书数据代理 - Vercel Serverless"
+  "description": "ATOS 飞书数据代理 - Vercel Serverless",
+  "scripts": {
+    "test": "vitest run --reporter=verbose"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.5"
+  }
 }
