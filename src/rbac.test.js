@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ACTION_RULES, extractActorRoles, requireRole } from './index.js';
+import worker from './index.js';
 
 describe('RBAC rules', () => {
   it('normalizes multi-role strings into canonical role labels', () => {
@@ -41,5 +42,12 @@ describe('RBAC rules', () => {
   it('notify can be called by authenticated known roles', () => {
     const allowed = requireRole({ role: '技术支持者' }, ['协调者', '统筹者', '推进者', '执行者', '破局者', '技术支持者'], 'notify:POST');
     expect(allowed.ok).toBe(true);
+  });
+
+  it('denies anonymous GET /api/members before table access', async () => {
+    const res = await worker.fetch(new Request('https://atos-api.example.com/api/members'), {});
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toBe('未登录或 token 失效');
   });
 });

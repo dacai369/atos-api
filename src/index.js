@@ -376,6 +376,8 @@ export default {
     const parts = url.pathname.replace(/^\/api\//, '').split('/');
     const tableName = parts[0];
     const recordId = parts[1];
+    const isApiRoute = url.pathname.startsWith('/api/');
+    let authPayload = null;
 
     // CORS preflight
     if (request.method === 'OPTIONS') {
@@ -447,13 +449,17 @@ export default {
       return json({ user: payload });
     }
 
+    if (isApiRoute) {
+      authPayload = await authenticateRequest(request, env);
+      if (!authPayload) return json({ error: '未登录或 token 失效' }, 401);
+    }
+
     // ───────── /api/notify ─────────
     // POST body: { open_id?, member_id?, name?, text, link?, source? }
     // 必须带至少一个目标字段。优先级：open_id > member_id > name
     if (url.pathname === '/api/notify' && request.method === 'POST') {
       try {
-        const payload = await authenticateRequest(request, env);
-        const notifyGuard = requireRole(payload, NOTIFY_ALLOWED_ROLES, 'notify:POST');
+        const notifyGuard = requireRole(authPayload, NOTIFY_ALLOWED_ROLES, 'notify:POST');
         if (!notifyGuard.ok) return json(notifyGuard.body, notifyGuard.status);
 
         const body = await request.json();
@@ -491,8 +497,7 @@ export default {
             method: request.method,
           }, 403);
         }
-        const payload = await authenticateRequest(request, env);
-        const authz = requireRole(payload, allowedRoles, `${tableName}:${request.method}`);
+        const authz = requireRole(authPayload, allowedRoles, `${tableName}:${request.method}`);
         if (!authz.ok) return json(authz.body, authz.status);
       }
 
