@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ACTION_RULES, extractActorRoles, requireRole } from './index.js';
+import { ACTION_RULES, OWNER_RULES, extractActorRoles, requireOwner, requireRole } from './index.js';
 import worker from './index.js';
 
 describe('RBAC rules', () => {
@@ -49,5 +49,49 @@ describe('RBAC rules', () => {
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.error).toBe('未登录或 token 失效');
+  });
+
+  it('allows executor to patch a task they own', () => {
+    const result = requireOwner(
+      { fields: { 负责人: '执行者A' } },
+      { role: '执行者', name: '执行者A' },
+      OWNER_RULES.tasks.PATCH,
+      'tasks',
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('denies executor from patching another owner task', () => {
+    const result = requireOwner(
+      { fields: { 负责人: '执行者B' } },
+      { role: '执行者', name: '执行者A' },
+      OWNER_RULES.tasks.PATCH,
+      'tasks',
+    );
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(403);
+    expect(result.body.error).toContain('非任务负责人');
+  });
+
+  it('allows breaker to claim a blockage with empty owner', () => {
+    const result = requireOwner(
+      { fields: { 破局者: '' } },
+      { role: '破局者', name: '张破局' },
+      OWNER_RULES.blockages.PATCH,
+      'blockages',
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('denies breaker from patching a blockage owned by someone else', () => {
+    const result = requireOwner(
+      { fields: { 破局者: '李破局' } },
+      { role: '破局者', name: '张破局' },
+      OWNER_RULES.blockages.PATCH,
+      'blockages',
+    );
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(403);
+    expect(result.body.error).toContain('非当前负责人');
   });
 });

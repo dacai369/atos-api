@@ -47,7 +47,28 @@ export const ACTION_RULES = {
   krs: { PATCH: ['统筹者'] },
   tickets: { POST: ['技术支持者'], PATCH: ['技术支持者'] },
   prompts: { PATCH: ['技术支持者'] },
-  members: { PATCH: ['技术支持者', '协调者', '统筹者'] },
+  members: { PATCH: [...KNOWN_ROLES] },
+};
+
+export const OWNER_RULES = {
+  tasks: {
+    PATCH: { ownerField: '负责人', exemptRoles: ['协调者', '推进者'] },
+  },
+  blockages: {
+    PATCH: { ownerField: '破局者', allowEmptyOwner: true, exemptRoles: [] },
+  },
+  arbitrations: {
+    PATCH: { ownerField: '仲裁人', allowEmptyOwner: true, exemptRoles: [] },
+  },
+  tickets: {
+    PATCH: { ownerField: '负责人', allowEmptyOwner: true, exemptRoles: [] },
+  },
+  prompts: {
+    PATCH: { ownerField: '创建者', exemptRoles: [] },
+  },
+  members: {
+    PATCH: { ownerField: '姓名', exemptRoles: ['协调者', '统筹者', '技术支持者'] },
+  },
 };
 
 const ROLE_ALIASES = {
@@ -101,6 +122,10 @@ function normalizeValue(val) {
     if (val.text !== undefined) return val.text;
   }
   return val;
+}
+
+function normalizeComparableValue(value) {
+  return typeof value === 'string' ? value.trim() : String(value ?? '').trim();
 }
 
 function normalizeRecord(record) {
@@ -235,6 +260,62 @@ export function requireRole(payload, allowedRoles, action) {
       required_roles: allowedRoles,
       current_roles: actorRoles,
       current_role_raw: payload.role ?? '',
+    },
+  };
+}
+
+function extractOwnerValues(value) {
+  const normalized = normalizeValue(value);
+  if (normalized === null || normalized === undefined) return [];
+  if (Array.isArray(normalized)) {
+    return normalized.flatMap((item) => extractOwnerValues(item));
+  }
+  const comparable = normalizeComparableValue(normalized);
+  return comparable ? [comparable] : [];
+}
+
+function getOwnerDeniedReason(tableName) {
+  if (tableName === 'tasks') return '无权操作此资源（非任务负责人）';
+  if (tableName === 'blockages') return '无权操作此资源（非当前负责人）';
+  if (tableName === 'arbitrations') return '无权操作此资源（非当前仲裁人）';
+  if (tableName === 'tickets') return '无权操作此资源（非当前负责人）';
+  if (tableName === 'prompts') return '无权操作此资源（非 Prompt 创建者）';
+  if (tableName === 'members') return '无权操作此资源（非当前成员）';
+  return '无权操作此资源';
+}
+
+export function requireOwner(record, payload, rule, tableName) {
+  if (!payload) {
+    return {
+      ok: false,
+      status: 401,
+      body: { error: '未登录或 token 失效', action: `${tableName}:PATCH` },
+    };
+  }
+
+  const actorRoles = extractActorRoles(payload.role ?? payload.roles ?? '');
+  if (actorRoles.some((role) => rule.exemptRoles.includes(role))) {
+    return { ok: true, status: 200 };
+  }
+
+  const expectedOwners = extractOwnerValues(record?.fields?.[rule.ownerField]);
+  if (expectedOwners.length === 0 && rule.allowEmptyOwner) {
+    return { ok: true, status: 200 };
+  }
+
+  const actorName = normalizeComparableValue(payload.name);
+  if (actorName && expectedOwners.some((owner) => normalizeComparableValue(owner) === actorName)) {
+    return { ok: true, status: 200 };
+  }
+
+  return {
+    ok: false,
+    status: 403,
+    body: {
+      error: getOwnerDeniedReason(tableName),
+      expected_owner: expectedOwners.join('、'),
+      actor: actorName,
+      owner_field: rule.ownerField,
     },
   };
 }
@@ -533,6 +614,18 @@ export default {
 
       // PATCH 更新
       if (request.method === 'PATCH' && recordId) {
+        const ownerRule = OWNER_RULES[tableName]?.PATCH;
+        if (ownerRule) {
+          const recordRes = await fetch(`${feishuUrl}/${recordId}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const recordData = await recordRes.json();
+          if (recordData.code !== 0) return json({ error: '记录不存在' }, 404);
+
+          const ownerCheck = requireOwner(recordData.data.record, authPayload, ownerRule, tableName);
+          if (!ownerCheck.ok) return json(ownerCheck.body, ownerCheck.status);
+        }
+
         const body = await request.json();
         const res = await fetch(`${feishuUrl}/${recordId}`, {
           method: 'PUT',
